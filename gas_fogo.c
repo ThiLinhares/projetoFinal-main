@@ -13,45 +13,48 @@
 #include "u8g2pico.h"
 #include "bme280_driver.h"
 
-/* ================= HARDWARE ================= */
+/* ================= HARDWARE (BitDogLab V6.3) ================= */
 
-// DISPLAY (I2C1)
+// DISPLAY (I2C1 - Fixo na placa)
 #define DISPLAY_I2C_PORT    i2c1    
 #define DISPLAY_SDA_PIN     14      
 #define DISPLAY_SCL_PIN     15      
 #define DISPLAY_I2C_ADDRESS 0x3C    
 
-// BME280 (I2C0)
+// BME280 (I2C0 - Sensor de Temperatura/Pressão)
 #define BME280_I2C_PORT     i2c0
 #define BME280_SDA_PIN      0
 #define BME280_SCL_PIN      1
 
-// ADS1115 (Soft I2C)
+// ADS1115 (Soft I2C Manual - Para evitar conflitos)
 #define SOFT_SDA_PIN        2
 #define SOFT_SCL_PIN        3
 #define ADS1115_ADDR        0x48
 
-// PERIFÉRICOS
+// PERIFÉRICOS DE SAÍDA
 #define LED_G_PIN 11 
 #define LED_B_PIN 12 
 #define LED_R_PIN 13 
 #define BUZZER_PIN 21
 
-/* ================= CALIBRAÇÃO (LIMITES) ================= */
+// PERIFÉRICOS DE ENTRADA
+#define BUTTON_A_PIN 5  
 
-// MQ-2 (Gás/Fumaça)
-#define MQ2_LIMIT_WARNING     0.8f   
-#define MQ2_LIMIT_ALARM       1.2f   
+/* ================= LIMITES COM HISTERESE ================= */
+
+// MQ-2 (Gás/Fumo)
+#define MQ2_SET_POINT         1.2f   // Ativa
+#define MQ2_RESET_POINT       1.0f   // Desativa
+#define MQ2_WARNING           0.8f
 
 // MQ-7 (Monóxido)
-#define MQ7_LIMIT_WARNING     1.8f   
-#define MQ7_LIMIT_ALARM       2.5f   
+#define MQ7_SET_POINT         2.5f   // Ativa
+#define MQ7_RESET_POINT       2.2f   // Desativa
+#define MQ7_WARNING           1.8f
 
-// IR (Fogo) - DESCE com fogo
-#define FIRE_LIMIT_ALARM      1.5f   
-
-#define TEMP_LIMIT_WARNING    45.0f 
-#define TEMP_LIMIT_ALARM      57.0f 
+// IR (Fogo) - Lógica "Low Active" (Tensão DESCE com fogo)
+#define FIRE_SET_POINT        1.5f   // Ativa (< 1.5V)
+#define FIRE_RESET_POINT      1.8f   // Desativa (> 1.8V)
 
 #define BRILHO_LED 25
 
@@ -73,7 +76,6 @@ u8g2_t u8g2_global;
 void inicializarDisplay(u8g2_t *u8g2);
 void inicializarHardware();
 void tocar_buzzer_pwm(uint frequency, uint duration_ms); 
-void tocarAlarmeProfissional(bool critico); 
 void definirBrilhoLED(uint gpio, uint8_t brilho);
 float ler_adc_soft_i2c(uint8_t canal, bool *sucesso); 
 void executar_autoteste_inicial(); 
@@ -92,7 +94,7 @@ void vApplicationMallocFailedHook(void) {
 }
 void vApplicationTickHook(void) {}
 
-/* ================= SOFT I2C ================= */
+/* ================= SOFT I2C (DRIVER ADS1115) ================= */
 void soft_i2c_init() {
     gpio_init(SOFT_SDA_PIN); gpio_init(SOFT_SCL_PIN);
     gpio_set_dir(SOFT_SDA_PIN, GPIO_IN); gpio_set_dir(SOFT_SCL_PIN, GPIO_IN);
@@ -163,7 +165,7 @@ float ler_adc_soft_i2c(uint8_t canal, bool *sucesso) {
     return raw * 0.0001875f;
 }
 
-/* ================= SISTEMA DE SOM PROFISSIONAL ================= */
+/* ================= SISTEMA DE SOM ================= */
 
 void tocar_buzzer_pwm(uint frequency, uint duration_ms) {
     if (frequency == 0) {
@@ -175,68 +177,64 @@ void tocar_buzzer_pwm(uint frequency, uint duration_ms) {
     uint32_t clock_freq = 125000000; 
     uint32_t divider = 16; 
     uint32_t wrap = (clock_freq / divider) / frequency;
-
     uint slice_num = pwm_gpio_to_slice_num(BUZZER_PIN);
     
     pwm_config config = pwm_get_default_config();
     pwm_config_set_clkdiv(&config, (float)divider);
     pwm_config_set_wrap(&config, wrap);
     pwm_init(slice_num, &config, true);
-
     pwm_set_gpio_level(BUZZER_PIN, wrap / 2); 
-    
     sleep_ms(duration_ms);
     pwm_set_gpio_level(BUZZER_PIN, 0);
 }
 
 void tocarAlarmeProfissional(bool critico) {
     if (critico) {
-        // Sirene de 400 a 3000Hz
         for (int f = 400; f < 3000; f += 200) {
             tocar_buzzer_pwm(f, 10); 
         }
     } else {
-        // Aviso simples
         tocar_buzzer_pwm(3000, 100); 
         sleep_ms(50);
         tocar_buzzer_pwm(0, 50);     
     }
 }
 
-/* ================= POST ================= */
+/* ================= POST / SETUP ================= */
 void executar_autoteste_inicial() {
-    printf("\n[POST] --- AUTO-TESTE (Interface Pro) ---\n");
+    printf("\n[POST] --- AUTO-TESTE INICIADO ---\n");
     inicializarDisplay(&u8g2_global);
     u8g2_SetFont(&u8g2_global, u8g2_font_6x10_tf);
     
-    printf("[POST] Testando Sirene...\n");
     u8g2_DrawStr(&u8g2_global, 20, 30, "INICIANDO...");
-    u8g2_DrawStr(&u8g2_global, 20, 45, "Calibrando...");
+    u8g2_DrawStr(&u8g2_global, 20, 45, "A calibrar...");
     u8g2_SendBuffer(&u8g2_global);
     
     tocar_buzzer_pwm(1000, 100);
-    tocar_buzzer_pwm(1500, 100);
-    tocar_buzzer_pwm(2000, 100);
     
+    // Pisca cores
     definirBrilhoLED(LED_R_PIN, 255); sleep_ms(100); definirBrilhoLED(LED_R_PIN, 0);
     definirBrilhoLED(LED_G_PIN, 255); sleep_ms(100); definirBrilhoLED(LED_G_PIN, 0);
     definirBrilhoLED(LED_B_PIN, 255); sleep_ms(100); definirBrilhoLED(LED_B_PIN, 0);
 
-    bool bme_ok = bme280_init(BME280_I2C_PORT, BME280_SDA_PIN, BME280_SCL_PIN);
+    // Teste Sensores
     bool ads_ok = false;
     ler_adc_soft_i2c(0, &ads_ok); 
+    bool bme_ok = bme280_init(BME280_I2C_PORT, BME280_SDA_PIN, BME280_SCL_PIN);
 
     u8g2_ClearBuffer(&u8g2_global);
-    if (bme_ok && ads_ok) {
+    if (ads_ok && bme_ok) {
         u8g2_DrawStr(&u8g2_global, 0, 40, "SISTEMA OK");
-        u8g2_SendBuffer(&u8g2_global);
-        sleep_ms(1000);
+        printf("[POST] Hardware OK.\n");
     } else {
-        u8g2_DrawStr(&u8g2_global, 0, 40, "FALHA HW");
-        u8g2_SendBuffer(&u8g2_global);
-        tocar_buzzer_pwm(200, 500); 
-        sleep_ms(1000);
+        u8g2_DrawStr(&u8g2_global, 0, 30, "ERRO HARDWARE");
+        if (!ads_ok) u8g2_DrawStr(&u8g2_global, 0, 45, "ADS1115 Falhou");
+        if (!bme_ok) u8g2_DrawStr(&u8g2_global, 0, 55, "BME280 Falhou");
+        printf("[POST] Falha de Hardware Detetada.\n");
+        sleep_ms(2000);
     }
+    u8g2_SendBuffer(&u8g2_global);
+    sleep_ms(1000);
 }
 
 /* ================= MAIN ================= */
@@ -256,13 +254,14 @@ int main() {
     while (true) {};
 }
 
-/* ================= TASKS ================= */
+/* ================= TASK DE SENSORES ================= */
 void vTaskSensores(void *pvParameters) {
     (void)pvParameters;
     SensorData_t data;
     bool bme_conectado = bme280_init(BME280_I2C_PORT, BME280_SDA_PIN, BME280_SCL_PIN);
     
     while (true) {
+        // --- 1. BME280 ---
         if (bme_conectado) {
             bme280_data_t readings;
             bme280_read(&readings);
@@ -273,8 +272,11 @@ void vTaskSensores(void *pvParameters) {
         } else {
             bme_conectado = bme280_init(BME280_I2C_PORT, BME280_SDA_PIN, BME280_SCL_PIN);
             data.bmeOK = false;
+            data.temperature = 0.0f; 
+            data.humidity = 0.0f;
         }
 
+        // --- 2. Sensores Analógicos ---
         float soma_mq2 = 0.0f, soma_mq7 = 0.0f, soma_ir = 0.0f;
         bool leitura_ok = false;
         bool todas_ok = true;
@@ -291,110 +293,171 @@ void vTaskSensores(void *pvParameters) {
         data.voltagem_ir  = soma_ir  / amostras;
         data.adsOK = todas_ok;
 
-        if (data.bmeOK && data.adsOK) {
-            // No serial mantemos os dados técnicos para debug
-            printf("[MONITOR] MQ2:%.2fV | MQ7:%.2fV | CHAMA:%.2fV\n", 
-                   data.voltagem_mq2, data.voltagem_mq7, data.voltagem_ir);
+        // --- 3. Monitor Serial ---
+        if (todas_ok) {
+            char *status_fumo = (data.voltagem_mq2 > MQ2_SET_POINT) ? "PERIGO" : "Normal";
+            char *status_co   = (data.voltagem_mq7 > MQ7_SET_POINT) ? "PERIGO" : "Normal";
+            char *status_fogo = (data.voltagem_ir < FIRE_SET_POINT) ? "FOGO DETETADO!" : "Seguro";
+
+            if (data.bmeOK) {
+                printf("[AMBIENTE] Temp: %.1fC | Humid: %.1f%% || [SENSORES] Fumo: %s (%.2fV) | CO: %s (%.2fV) | Fogo: %s (%.2fV)\n", 
+                       data.temperature, data.humidity,
+                       status_fumo, data.voltagem_mq2,
+                       status_co, data.voltagem_mq7,
+                       status_fogo, data.voltagem_ir);
+            } else {
+                printf("[AMBIENTE] Erro BME280 || [SENSORES] Fumo: %s (%.2fV) | CO: %s | Fogo: %s\n",
+                       status_fumo, data.voltagem_mq2, status_co, status_fogo);
+            }
+        } else {
+            printf("[ERRO] Falha ADS1115.\n");
         }
+
         xQueueSend(xQueueSensores, &data, 0);
-        vTaskDelay(pdMS_TO_TICKS(1500));
+        vTaskDelay(pdMS_TO_TICKS(1000)); 
     }
 }
 
-// --- TAREFA DE DISPLAY ATUALIZADA (Interface Amigável + Tela Cheia) ---
+/* ================= TASK DE DISPLAY ================= */
 void vTaskDisplayControl(void *pvParameters) {
     (void)pvParameters;
     u8g2_t *u8g2 = &u8g2_global; 
     SensorData_t sData;
     char strBuffer[32];
 
+    // Estados com Histerese
+    static bool state_fire = false;
+    static bool state_gas = false;
+    static bool state_co = false;
+
+    // Silêncio
+    bool modo_silencioso = false;
+    absolute_time_t fim_do_silencio;
+
+    // Heartbeat
+    static bool heartbeat = false;
+
     while (true) {
-        if (xQueueReceive(xQueueSensores, &sData, pdMS_TO_TICKS(4000)) == pdTRUE) {
+        if (xQueueReceive(xQueueSensores, &sData, pdMS_TO_TICKS(100)) == pdTRUE) {
+            
+            // --- 1. Histerese ---
+            if (sData.voltagem_ir < FIRE_SET_POINT) state_fire = true;
+            else if (sData.voltagem_ir > FIRE_RESET_POINT) state_fire = false;
+
+            if (sData.voltagem_mq2 > MQ2_SET_POINT) state_gas = true;
+            else if (sData.voltagem_mq2 < MQ2_RESET_POINT) state_gas = false;
+
+            if (sData.voltagem_mq7 > MQ7_SET_POINT) state_co = true;
+            else if (sData.voltagem_mq7 < MQ7_RESET_POINT) state_co = false;
+
+            bool perigo_critico = (state_fire || state_gas || state_co);
+            bool atencao = (!perigo_critico) && (sData.voltagem_mq2 > MQ2_WARNING || sData.voltagem_mq7 > MQ7_WARNING);
+
+            // --- 2. Heartbeat (Alterna estado) ---
+            heartbeat = !heartbeat; 
+
+            // --- 3. Botão A (Silenciar) ---
+            if (gpio_get(BUTTON_A_PIN) == 0) { 
+                if (!modo_silencioso) {
+                    printf("[USER] SILENCIAR ATIVO (5s)\n");
+                    modo_silencioso = true;
+                    fim_do_silencio = make_timeout_time_ms(5000);
+                    // Apaga tudo
+                    definirBrilhoLED(LED_R_PIN, 0); definirBrilhoLED(LED_G_PIN, 0); definirBrilhoLED(LED_B_PIN, 0);
+                    pwm_set_gpio_level(BUZZER_PIN, 0);
+                }
+            }
+
+            if (modo_silencioso) {
+                if (time_reached(fim_do_silencio)) {
+                    printf("[SYSTEM] SILENCIO EXPIROU\n");
+                    modo_silencioso = false;
+                }
+            }
+
+            // --- 4. Display ---
             u8g2_ClearBuffer(u8g2);
 
             if (!sData.adsOK) {
                 u8g2_SetFont(u8g2, u8g2_font_6x10_tf);
                 u8g2_DrawStr(u8g2, 0, 30, "ERRO SENSORES");
-                u8g2_DrawStr(u8g2, 0, 45, "Verificar Cabos");
+                definirBrilhoLED(LED_B_PIN, 50); 
             } else {
-                // Analise de Status
-                bool fogo_ir  = (sData.voltagem_ir < FIRE_LIMIT_ALARM);
-                bool mq2_gas  = (sData.voltagem_mq2 > MQ2_LIMIT_ALARM);
-                bool mq7_co   = (sData.voltagem_mq7 > MQ7_LIMIT_ALARM);
                 
-                // Avisos (Amarelo)
-                bool mq2_warn = (sData.voltagem_mq2 > MQ2_LIMIT_WARNING);
-                bool mq7_warn = (sData.voltagem_mq7 > MQ7_LIMIT_WARNING);
-
-                bool perigo_critico = (fogo_ir || mq2_gas || mq7_co);
-                bool atencao = (mq2_warn || mq7_warn);
-
-                // --- HARDWARE (LED/BUZZER) ---
-                if (perigo_critico) {
-                    definirBrilhoLED(LED_R_PIN, 255); definirBrilhoLED(LED_G_PIN, 0); definirBrilhoLED(LED_B_PIN, 0);
-                    tocarAlarmeProfissional(true); 
-                } else if (atencao) {
-                    definirBrilhoLED(LED_R_PIN, 0); definirBrilhoLED(LED_G_PIN, 0); definirBrilhoLED(LED_B_PIN, BRILHO_LED);
-                    tocarAlarmeProfissional(false); 
-                } else {
-                    definirBrilhoLED(LED_R_PIN, 0); definirBrilhoLED(LED_G_PIN, BRILHO_LED); definirBrilhoLED(LED_B_PIN, 0);
-                }
-
-                // --- DESENHO NA TELA (Lógica Nova) ---
-
-                if (perigo_critico) {
-                    // MODO TELA CHEIA (FULL SCREEN ALERT)
-                    // Fundo Branco (Invertido) para chamar atenção
-                    u8g2_SetDrawColor(u8g2, 1);
-                    u8g2_DrawBox(u8g2, 0, 0, 128, 64);
-                    u8g2_SetDrawColor(u8g2, 0); // Texto Preto (Vazado)
+                if (modo_silencioso) {
+                    // SILÊNCIO
+                    u8g2_SetFont(u8g2, u8g2_font_ncenB10_tr);
+                    u8g2_DrawStr(u8g2, 10, 20, "ALARME");
+                    u8g2_DrawStr(u8g2, 10, 40, "SILENCIADO");
                     
-                    // Fonte maior (Negrito)
-                    u8g2_SetFont(u8g2, u8g2_font_ncenB14_tr); 
+                    int tempo = absolute_time_diff_us(get_absolute_time(), fim_do_silencio) / 1000;
+                    if(tempo < 0) tempo = 0;
+                    u8g2_DrawBox(u8g2, 0, 55, (tempo * 128) / 5000, 5);
 
-                    if (fogo_ir) {
-                        u8g2_DrawStr(u8g2, 10, 30, "! FOGO !");
+                    definirBrilhoLED(LED_R_PIN, 0); pwm_set_gpio_level(BUZZER_PIN, 0);
+
+                } else {
+                    // MODO ATIVO
+                    if (perigo_critico) {
+                        // CRÍTICO
+                        u8g2_SetDrawColor(u8g2, 1);
+                        u8g2_DrawBox(u8g2, 0, 0, 128, 64);
+                        u8g2_SetDrawColor(u8g2, 0); 
+                        
+                        u8g2_SetFont(u8g2, u8g2_font_ncenB14_tr);
+                        if (state_fire) {
+                            u8g2_DrawStr(u8g2, 15, 30, "! FOGO !");
+                            u8g2_SetFont(u8g2, u8g2_font_6x10_tf);
+                            u8g2_DrawStr(u8g2, 10, 50, "Aperte A p/ Parar");
+                        } else if (state_gas) {
+                            u8g2_DrawStr(u8g2, 15, 30, "GAS VAZ.");
+                        } else {
+                            u8g2_DrawStr(u8g2, 5, 30, "CO TOXICO");
+                        }
+                        
+                        u8g2_SetDrawColor(u8g2, 1);
+                        definirBrilhoLED(LED_R_PIN, 255);
+                        tocarAlarmeProfissional(true);
+
+                    } else if (atencao) {
+                        // ATENÇÃO
                         u8g2_SetFont(u8g2, u8g2_font_6x10_tf);
-                        u8g2_DrawStr(u8g2, 20, 50, "Evacuar Area");
-                    } else if (mq2_gas) {
-                        u8g2_DrawStr(u8g2, 15, 30, "GAS VAZ.");
+                        u8g2_DrawStr(u8g2, 35, 10, "ATENCAO");
+                        sprintf(strBuffer, "Gas: %.1fV", sData.voltagem_mq2);
+                        u8g2_DrawStr(u8g2, 0, 30, strBuffer);
+                        
+                        definirBrilhoLED(LED_B_PIN, BRILHO_LED);
+                        tocarAlarmeProfissional(false);
+
+                    } else {
+                        // SEGURO
                         u8g2_SetFont(u8g2, u8g2_font_6x10_tf);
-                        u8g2_DrawStr(u8g2, 10, 50, "Risco Explosao");
-                    } else if (mq7_co) {
-                        u8g2_DrawStr(u8g2, 5, 30, "CO ALTO!");
-                        u8g2_SetFont(u8g2, u8g2_font_6x10_tf);
-                        u8g2_DrawStr(u8g2, 20, 50, "Gas Toxico");
+                        u8g2_DrawStr(u8g2, 30, 10, "MONITORAMENTO");
+                        u8g2_DrawHLine(u8g2, 0, 12, 128);
+                        
+                        if (sData.bmeOK) sprintf(strBuffer, "T:%.1fC H:%.0f%%", sData.temperature, sData.humidity);
+                        else sprintf(strBuffer, "T:-- C H:-- %%");
+                        u8g2_DrawStr(u8g2, 0, 25, strBuffer);
+                        
+                        sprintf(strBuffer, "Fumo:%.1f CO:%.1f", sData.voltagem_mq2, sData.voltagem_mq7);
+                        u8g2_DrawStr(u8g2, 0, 40, strBuffer);
+                        
+                        u8g2_DrawStr(u8g2, 0, 60, "Status: Seguro");
+
+                        // HEARTBEAT
+                        // Verde pisca (Heartbeat) - Azul desligado
+                        if(heartbeat) {
+                            u8g2_DrawBox(u8g2, 122, 0, 4, 4); // Ponto no display
+                            definirBrilhoLED(LED_G_PIN, BRILHO_LED); // Verde Aceso
+                        } else {
+                             definirBrilhoLED(LED_G_PIN, 0); // Verde Apagado
+                        }
+
+                        // Garante que os outros estão apagados
+                        definirBrilhoLED(LED_R_PIN, 0); 
+                        definirBrilhoLED(LED_B_PIN, 0); 
+                        pwm_set_gpio_level(BUZZER_PIN, 0);
                     }
-                    // Restaura cor normal para próxima volta
-                    u8g2_SetDrawColor(u8g2, 1); 
-
-                } else {
-                    // MODO MONITORAMENTO (Interface Limpa)
-                    u8g2_SetFont(u8g2, u8g2_font_6x10_tf);
-                    
-                    // Cabeçalho
-                    if (atencao) u8g2_DrawStr(u8g2, 35, 10, "ATENCAO");
-                    else u8g2_DrawStr(u8g2, 35, 10, "MONITORAMENTO");
-                    u8g2_DrawHLine(u8g2, 0, 12, 128);
-
-                    // Linha 1: Temperatura (Isso todo mundo entende)
-                    sprintf(strBuffer, "Ambiente: %.1f C", sData.temperature);
-                    u8g2_DrawStr(u8g2, 0, 25, strBuffer);
-
-                    // Linha 2: Fumaça/Gás (Tradução para Humano)
-                    char *status_mq2 = "Normal";
-                    if(mq2_warn) status_mq2 = "Alto";
-                    sprintf(strBuffer, "Fumaca: %s", status_mq2);
-                    u8g2_DrawStr(u8g2, 0, 37, strBuffer);
-
-                    // Linha 3: Monóxido (Tradução para Humano)
-                    char *status_co = "Seguro";
-                    if(mq7_warn) status_co = "Detectado";
-                    sprintf(strBuffer, "CO: %s", status_co);
-                    u8g2_DrawStr(u8g2, 0, 49, strBuffer);
-
-                    // Linha 4: Fogo
-                    u8g2_DrawStr(u8g2, 0, 61, "Fogo: Ausente");
                 }
             }
             u8g2_SendBuffer(u8g2);
@@ -414,9 +477,11 @@ void definirBrilhoLED(uint gpio, uint8_t brilho) {
 }
 void inicializarHardware() {
     configurarPWM_LED(LED_R_PIN); configurarPWM_LED(LED_G_PIN); configurarPWM_LED(LED_B_PIN);
-    definirBrilhoLED(LED_R_PIN, 0); definirBrilhoLED(LED_G_PIN, 0); definirBrilhoLED(LED_B_PIN, 0);
-    
     gpio_set_function(BUZZER_PIN, GPIO_FUNC_PWM);
+    
+    gpio_init(BUTTON_A_PIN);
+    gpio_set_dir(BUTTON_A_PIN, GPIO_IN);
+    gpio_pull_up(BUTTON_A_PIN);
 }
 void inicializarDisplay(u8g2_t *u8g2) {
     u8g2_Setup_ssd1306_i2c_128x64_noname_f_pico((u8g2pico_t *)u8g2, DISPLAY_I2C_PORT, DISPLAY_SDA_PIN, DISPLAY_SCL_PIN, U8G2_R0, DISPLAY_I2C_ADDRESS);
